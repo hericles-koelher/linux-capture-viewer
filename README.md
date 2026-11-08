@@ -1,6 +1,14 @@
 # Linux Capture Viewer
 
-A lightweight HDMI capture viewer for Linux Mint using FFplay for video and PipeWire for audio. No OBS required.
+A configuration and desktop launcher that makes it easier to view video and listen to audio from USB capture cards on Linux Mint.
+
+This repository provides installation scripts, a tested FFplay/PipeWire configuration, and Cinnamon desktop integration. FFplay displays the video; PipeWire routes the audio to your speakers or headphones. The launcher starts and stops them together, so you can monitor a USB capture card without opening OBS.
+
+## Project scope
+
+The project is a convenience setup around existing tools, not a standalone video player, capture driver, or recording application. FFmpeg/FFplay, PipeWire and the other dependencies are installed from the system package repositories and remain separate projects under their own licenses.
+
+The included defaults target the UltraSemi USB3 Video card tested below. Other USB capture cards may require device identifiers and video format changes.
 
 ## Tested setup
 
