@@ -14,7 +14,7 @@ case "${1:-}" in
         ;;
     *) echo "Usage: ./install.sh [--skip-deps]" >&2; exit 1 ;;
 esac
-for tool in ffplay v4l2-ctl pactl pw-loopback python3 wmctrl flock desktop-file-validate; do
+for tool in ffplay v4l2-ctl pactl pw-loopback python3 wmctrl flock desktop-file-validate zenity; do
     command -v "$tool" >/dev/null || { echo "Missing dependency: $tool" >&2; exit 1; }
 done
 /usr/bin/python3 -c 'import gi, ctypes; gi.require_version("Gtk", "3.0"); from gi.repository import Gtk; ctypes.CDLL("libX11.so.6")'
@@ -22,6 +22,7 @@ bindir="$HOME/.local/bin"
 apps="$HOME/.local/share/applications"
 mkdir -p "$bindir" "$apps"
 install -m 755 "$root/bin/capture-viewer" "$bindir/capture-viewer"
+install -m 755 "$root/bin/capture-viewer-config" "$bindir/capture-viewer-config"
 install -m 755 "$root/bin/capture-viewer-window" "$bindir/capture-viewer-window"
 # Escape the executable path using desktop entry Exec syntax.
 /usr/bin/python3 - "$bindir/capture-viewer" "$apps/capture-viewer.desktop" <<'PYDESKTOP'
@@ -31,14 +32,20 @@ exe = sys.argv[1].replace('\\', '\\\\').replace('"', '\\"').replace('`', '\\`').
 Path(sys.argv[2]).write_text(f'''[Desktop Entry]
 Type=Application
 Name=Capture Viewer
-Comment=1080p 60 fps video and low-latency audio
+Comment=View USB video capture devices with optional low-latency audio
 Exec="{exe}"
 Icon=camera-video
 Terminal=false
 Categories=AudioVideo;Video;
-Keywords=HDMI;capture;FFplay;UltraSemi;
+Keywords=HDMI;capture;FFplay;USB;V4L2;
 StartupNotify=false
 StartupWMClass=capture-viewer
+Actions=Configure;
+
+[Desktop Action Configure]
+Name=Configure Capture Viewer
+Exec="{exe}" --configure
+Icon=camera-video
 ''')
 PYDESKTOP
 desktop-file-validate "$apps/capture-viewer.desktop"

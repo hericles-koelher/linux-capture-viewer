@@ -8,25 +8,52 @@ This repository provides installation scripts, a tested FFplay/PipeWire configur
 
 The project is a convenience setup around existing tools, not a standalone video player, capture driver, or recording application. FFmpeg/FFplay, PipeWire and the other dependencies are installed from the system package repositories and remain separate projects under their own licenses.
 
-The included defaults target the UltraSemi USB3 Video card tested below. Other USB capture cards may require device identifiers and video format changes.
+The launcher discovers V4L2 video capture nodes, filters out metadata-only nodes, and asks you to choose a device and one of its advertised format/resolution/frame-rate combinations. Audio is optional and can be disabled. Preferences are stored as JSON under your XDG configuration directory.
 
-## Tested setup
+## Requirements and tested setup
 
-- Linux Mint 22.3, Cinnamon on X11, PipeWire 1.0.5, FFmpeg 6.1.1.
+- Linux Mint 22.3, Cinnamon on X11, with PipeWire active; tested with PipeWire 1.0.5 and FFmpeg 6.1.1.
 - UltraSemi USB3 Video (USB ID `345f:2131`), connected over USB 3.
 - 1920×1080 at 60 fps, uncompressed YUYV video.
 - Stereo audio at 48 kHz through PipeWire, requesting 20 ms latency. This is a target, not a measurement of total latency.
 - Capture modes exposed by this device do not include 2560×1440. Higher-resolution HDMI input acceptance has not been tested.
 
+The installer targets Linux Mint, Ubuntu, and Debian systems using APT. Package names and availability can vary on other Debian/Ubuntu versions. Other Linux distributions are not supported by the installer.
+
 ## Install
 
-Clone this repository, enter its directory, then run:
+Run these commands as your regular user:
 
 ```sh
+sudo apt update
+sudo apt install -y git
+git clone https://github.com/hericles-koelher/linux-capture-viewer.git
+cd linux-capture-viewer
 ./install.sh
 ```
 
-Run as your regular user. The installer requests sudo for APT packages only. It installs FFmpeg, V4L2 utilities, PipeWire tools, audio utilities and window integration dependencies. Package installation can affect the system audio stack: this was designed for Mint with PipeWire already active. It does not explicitly change services, default audio devices, volumes or group memberships.
+The installer requests sudo for APT packages only. It installs the dependencies listed below, then places the app under `~/.local` and adds **Capture Viewer** to the application menu. PipeWire should already be active in the desktop session. The installer does not explicitly change services, default audio devices, volumes or group memberships.
+
+### Optional: install dependencies manually
+
+If you prefer to install the dependencies yourself, use the exact package list from the installer:
+
+```sh
+sudo apt update
+sudo apt install -y ffmpeg v4l-utils pipewire pipewire-bin pipewire-pulse pulseaudio-utils python3 python3-gi gir1.2-gtk-3.0 libx11-6 wmctrl zenity libnotify-bin util-linux desktop-file-utils
+./install.sh --skip-deps
+```
+
+The packages provide:
+
+- `ffmpeg`: FFplay video playback.
+- `v4l-utils`: V4L2 device and mode discovery.
+- `pipewire`, `pipewire-bin`, `pipewire-pulse`, `pulseaudio-utils`: PipeWire audio routing and PulseAudio-compatible commands.
+- `python3`, `python3-gi`, `gir1.2-gtk-3.0`: the GTK settings window.
+- `libx11-6`, `wmctrl`: X11 window handling.
+- `zenity`, `libnotify-bin`: dialogs and desktop notifications.
+- `util-linux`: `flock` instance locking.
+- `desktop-file-utils`: desktop entry validation and menu database update.
 
 If all dependencies are already installed:
 
@@ -34,13 +61,12 @@ If all dependencies are already installed:
 ./install.sh --skip-deps
 ```
 
-Open **Capture Viewer** from the application menu. Press **Q** or close the video window to stop both video and audio. Audio uses the default output selected when launching. Only one viewer instance is allowed per user.
-
-The launcher detects a single UltraSemi USB3 Video device automatically, without a fixed device number, serial number or username. Connect the USB capture device and an active HDMI source before launching.
+Open **Capture Viewer** from the application menu. Each launch opens one settings window with your previous choices prefilled: video device, format, resolution, frame rate, and optional audio source. Cancel closes the window without starting playback or changing saved settings. **Start** saves the selected settings and begins playback. Press **Q** or close the video window to stop playback. Audio uses the current default output. Only one viewer instance is allowed per user. To open settings from a terminal, use `~/.local/bin/capture-viewer --configure`.
 
 ## Installed files
 
 - `~/.local/bin/capture-viewer`
+- `~/.local/bin/capture-viewer-config`
 - `~/.local/bin/capture-viewer-window`
 - `~/.local/share/applications/capture-viewer.desktop`
 - Logs: `${XDG_CACHE_HOME:-~/.cache}/capture-viewer/`
@@ -49,14 +75,7 @@ Reinstalling replaces these application files. It does not delete personal confi
 
 ## Other devices or multiple capture devices
 
-Create `${XDG_CONFIG_HOME:-~/.config}/capture-viewer/config.sh` with the exact device paths/names:
-
-```sh
-video=/dev/v4l/by-id/usb-YOUR_DEVICE-video-index0
-source=alsa_input.usb-YOUR_DEVICE.analog-stereo
-```
-
-This is a trusted shell configuration file executed as your user. Device formats remain fixed to the tested 1080p60 YUYV setup; change the viewer script if your device requires another format.
+Configuration is saved at `${XDG_CONFIG_HOME:-~/.config}/capture-viewer/config.json`. Video nodes prefer a stable `/dev/v4l/by-id` path when available. The tested UltraSemi mode (1920x1080, 60 fps, YUYV) appears first when supported, but the selected device's advertised modes determine the available choices. The app handles a generic subset of mapped FourCC formats, discrete resolutions and frame intervals; it cannot guarantee compatibility with every USB capture card. The 2K mode limitation above applies to the tested card only.
 
 Find identifiers and supported modes with:
 

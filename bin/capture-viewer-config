@@ -1,0 +1,294 @@
+#!/usr/bin/python3
+"""Discover V4L2 modes and safely manage Capture Viewer JSON settings."""
+import glob
+import json
+import os
+import re
+import subprocess
+import sys
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+
+PREFERRED = ("yuyv422", "1920x1080", "60")
+FFMPEG_FORMATS = {"YUYV": "yuyv422", "MJPG": "mjpeg", "JPEG": "mjpeg", "H264": "h264",
+                  "NV12": "nv12", "NV21": "nv21", "RGB3": "rgb24", "BGR3": "bgr24",
+                  "GREY": "gray", "Y800": "gray", "YU12": "yuv420p"}
+
+
+def run(args):
+    return subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False).stdout
+
+
+def devices():
+    found = {}
+    for node in sorted(glob.glob("/dev/video[0-9]*")):
+        info = run(["v4l2-ctl", "-d", node, "--all"])
+        caps = re.search(r"Device Caps\s*:[^\n]*\n((?:\s+[^\n]*\n)*)", info)
+        device_caps = caps.group(0) if caps else info
+        if not re.search(r"^\s+Video Capture\s*$", device_caps, re.M) or re.search(r"^\s+Metadata Capture\s*$", device_caps, re.M):
+            continue
+        aliases = sorted(p for p in glob.glob("/dev/v4l/by-id/*") if os.path.realpath(p) == os.path.realpath(node))
+        found[aliases[0] if aliases else node] = node
+    return found
+
+
+def modes(node):
+    output = run(["v4l2-ctl", "-d", node, "--list-formats-ext"])
+    fmt = None
+    size = None
+    result = []
+    for line in output.splitlines():
+        m = re.search(r"\[(\d+)\]:\s+'([^']+)'", line)
+        if m:
+            fourcc = m.group(2).strip().upper()
+            fmt = FFMPEG_FORMATS.get(fourcc)
+            size = None
+        m = re.search(r"Size:\s+Discrete\s+(\d+x\d+)", line)
+        if m:
+            size = m.group(1)
+        elif "Size:" in line:
+            size = None
+        m = re.search(r"Interval:\s+Discrete\s+[\d.]+s\s+\(([\d.]+)\s+fps\)", line)
+        if m and fmt and size:
+            try:
+                fps = format(Decimal(m.group(1)).normalize(), "f")
+            except InvalidOperation:
+                continue
+            result.append((fmt, size, fps))
+    return list(dict.fromkeys(result))
+
+
+def audio_sources():
+    """Return (stable source name, friendly description) pairs."""
+    result = []
+    try:
+        raw = run(["pactl", "-f", "json", "list", "sources"])
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            for source in parsed:
+                name = source.get("name", "")
+                if name and not name.endswith(".monitor"):
+                    properties = source.get("properties") or {}
+                    description = source.get("description")
+                    if not description or description == "(null)":
+                        description = properties.get("device.product.name") or name
+                    result.append((name, description))
+    except (ValueError, AttributeError):
+        pass
+    if result:
+        return [("", "No audio"), *result]
+    # Older pactl versions do not support JSON output.
+    try:
+        raw = run(["pactl", "list", "sources"])
+    except OSError:
+        return [("", "No audio")]
+    name = description = ""
+    for line in raw.splitlines() + [""]:
+        m = re.match(r"\s*Name:\s*(\S+)", line)
+        if m:
+            name = m.group(1)
+        m = re.match(r"\s*Description:\s*(.*?)\s*$", line)
+        if m:
+            description = m.group(1)
+        if not line.strip() and name and not name.endswith(".monitor"):
+            result.append((name, description or name))
+            name = description = ""
+    return [("", "No audio"), *result]
+
+
+def dependent_mode_options(combos, pixel_format=None, resolution=None):
+    """Return supported format, resolution, and frame-rate choices."""
+    formats = list(dict.fromkeys(c[0] for c in combos))
+    if pixel_format not in formats:
+        pixel_format = PREFERRED[0] if PREFERRED[0] in formats else (formats[0] if formats else None)
+    resolutions = list(dict.fromkeys(c[1] for c in combos if c[0] == pixel_format))
+    if resolution not in resolutions:
+        resolution = PREFERRED[1] if PREFERRED[1] in resolutions else (resolutions[0] if resolutions else None)
+    rates = list(dict.fromkeys(c[2] for c in combos if c[:2] == (pixel_format, resolution)))
+    return formats, resolutions, rates
+
+
+def friendly_device(node):
+    node_name = Path(node).name
+    try:
+        name = (Path("/sys/class/video4linux") / node_name / "name").read_text(encoding="utf-8").strip()
+    except OSError:
+        name = ""
+    if not name:
+        name = node_name
+    if ":" in name:
+        parts = [part.strip() for part in name.split(":")]
+        if parts and all(part == parts[0] for part in parts):
+            name = parts[0]
+    return name
+
+
+def configure_dialog(vids, previous):
+    """Show a single GTK dialog and return settings, or None on cancel."""
+    try:
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import GLib, Gtk
+    except (ImportError, ValueError):
+        print("Capture Viewer requires GTK 3 (python3-gi).", file=sys.stderr)
+        return None
+
+    GLib.set_prgname("capture-viewer")
+    GLib.set_application_name("Capture Viewer")
+    Gtk.Window.set_default_icon_name("camera-video")
+    dialog = Gtk.Dialog(title="Capture Viewer", modal=True)
+    dialog.set_icon_name("camera-video")
+    dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+    confirm = dialog.add_button("Start", Gtk.ResponseType.OK)
+    dialog.set_default_size(440, -1)
+    box = dialog.get_content_area()
+    box.set_spacing(10)
+    box.set_border_width(16)
+
+    def section(title):
+        label = Gtk.Label(label=title, xalign=0)
+        label.get_style_context().add_class("heading")
+        box.pack_start(label, False, False, 0)
+
+    def combo_row(label_text):
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        label = Gtk.Label(label=label_text, xalign=0)
+        label.set_size_request(120, -1)
+        combo = Gtk.ComboBoxText()
+        combo.set_hexpand(True)
+        row.pack_start(label, False, False, 0)
+        row.pack_start(combo, True, True, 0)
+        box.pack_start(row, False, False, 0)
+        return combo
+
+    def select_id(combo, value):
+        if value is not None:
+            combo.set_active_id(value)
+        else:
+            combo.set_active(-1)
+
+    section("Video device")
+    device_combo = combo_row("Device")
+    section("Video settings")
+    format_combo = combo_row("Pixel format")
+    resolution_combo = combo_row("Resolution")
+    fps_combo = combo_row("Frame rate")
+    section("Audio")
+    audio_combo = combo_row("Source")
+    error = Gtk.Label(xalign=0)
+    error.set_line_wrap(True)
+    error.get_style_context().add_class("error")
+    box.pack_start(error, False, False, 0)
+
+    keys = list(vids)
+    labels = [friendly_device(vids[k]) for k in keys]
+    counts = {label: labels.count(label) for label in set(labels)}
+    for key, label, node in zip(keys, labels, (vids[k] for k in keys)):
+        shown = label + (" (" + Path(node).name + ")" if counts[label] > 1 else "")
+        device_combo.append(key, shown)
+    audio = audio_sources()
+    for source, description in audio:
+        audio_combo.append(source, description)
+
+    available = {}
+    def update_modes(*_):
+        key = device_combo.get_active_id()
+        combos = available.get(key, [])
+        formats, _, _ = dependent_mode_options(combos)
+        format_combo.remove_all(); resolution_combo.remove_all(); fps_combo.remove_all()
+        for value in formats:
+            format_combo.append(value, value)
+        wanted_format = previous.get("format")
+        select_id(format_combo, wanted_format if wanted_format in formats else (PREFERRED[0] if PREFERRED[0] in formats else (formats[0] if formats else None)))
+        update_resolutions()
+        confirm.set_sensitive(bool(combos))
+        error.set_text("" if combos else ("No video devices found." if not vids else "No supported video modes found for this device."))
+
+    def update_resolutions(*_):
+        key, fmt = device_combo.get_active_id(), format_combo.get_active_id()
+        combos = available.get(key, [])
+        _, resolutions, _ = dependent_mode_options(combos, fmt)
+        resolution_combo.remove_all(); fps_combo.remove_all()
+        for value in resolutions:
+            resolution_combo.append(value, value)
+        wanted = previous.get("resolution")
+        select_id(resolution_combo, wanted if wanted in resolutions else (PREFERRED[1] if PREFERRED[1] in resolutions else (resolutions[0] if resolutions else None)))
+        update_fps()
+
+    def update_fps(*_):
+        key, fmt, size = device_combo.get_active_id(), format_combo.get_active_id(), resolution_combo.get_active_id()
+        _, _, rates = dependent_mode_options(available.get(key, []), fmt, size)
+        fps_combo.remove_all()
+        for value in rates:
+            fps_combo.append(value, value)
+        wanted = previous.get("framerate")
+        select_id(fps_combo, wanted if wanted in rates else (PREFERRED[2] if PREFERRED[2] in rates else (rates[0] if rates else None)))
+
+    for key, node in vids.items():
+        available[key] = sorted(modes(node), key=lambda x: (x != PREFERRED, x[1], x[2], x[0]))
+    device_combo.connect("changed", update_modes)
+    format_combo.connect("changed", update_resolutions)
+    resolution_combo.connect("changed", update_fps)
+    previous_video = previous.get("video")
+    select_id(device_combo, previous_video if previous_video in keys else (keys[0] if keys else None))
+    if not keys:
+        update_modes()
+    old_audio = previous.get("audio_source", "")
+    select_id(audio_combo, old_audio if any(source == old_audio for source, _ in audio) else "")
+    dialog.show_all()
+    response = dialog.run()
+    selected = None
+    if response == Gtk.ResponseType.OK and confirm.get_sensitive():
+        selected = {"video": device_combo.get_active_id(), "format": format_combo.get_active_id(),
+                    "resolution": resolution_combo.get_active_id(), "framerate": fps_combo.get_active_id(),
+                    "audio_source": audio_combo.get_active_id() or ""}
+    dialog.destroy()
+    return selected
+
+
+def write_config(path):
+    vids = devices()
+    previous = load_config(path) or {}
+    data = configure_dialog(vids, previous)
+    if data is None:
+        return 1
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    tmp.chmod(0o600)
+    tmp.replace(target)
+    return 0
+
+
+def load_config(path):
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        keys = ("video", "format", "resolution", "framerate", "audio_source")
+        if not isinstance(data, dict) or any(k not in data or not isinstance(data[k], str) for k in keys):
+            raise ValueError("invalid fields")
+        if any("\n" in data.get(k, "") or "\r" in data.get(k, "") for k in keys):
+            raise ValueError("invalid line breaks")
+        if not data["video"].startswith("/dev/") or not re.fullmatch(r"[A-Za-z0-9_]+", data["format"]):
+            raise ValueError("invalid video settings")
+        if not re.fullmatch(r"\d+x\d+", data["resolution"]) or not re.fullmatch(r"\d+(?:\.\d+)?", data["framerate"]):
+            raise ValueError("invalid mode settings")
+        return data
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
+if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] in ("--read", "--audio"):
+        c = load_config(sys.argv[2])
+        if c is None:
+            sys.exit(1)
+        if sys.argv[1] == "--audio":
+            print(c.get("audio_source", ""))
+        else:
+            print(c.get("video", "")); print(c.get("format", "")); print(c.get("resolution", "")); print(c.get("framerate", ""))
+    elif len(sys.argv) == 2:
+        sys.exit(write_config(sys.argv[1]))
+    else:
+        print("Usage: capture-viewer-config CONFIG | --read CONFIG | --audio CONFIG", file=sys.stderr)
+        sys.exit(2)
