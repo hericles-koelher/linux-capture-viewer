@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -u
+# Optional configuration for another capture device.
+video=
+source=
+config="${XDG_CONFIG_HOME:-$HOME/.config}/capture-viewer/config.sh"
+[[ ! -f "$config" ]] || source "$config"
+if [[ -z "$video" ]]; then
+    shopt -s nullglob
+    devices=(/dev/v4l/by-id/usb-UltraSemi_USB3_Video_*-video-index0)
+    if (( ${#devices[@]} == 1 )); then video=${devices[0]}; fi
+fi
+if [[ -z "$source" ]]; then
+    mapfile -t sources < <(pactl list short sources | cut -f2 | grep '^alsa_input.usb-UltraSemi_USB3_Video_')
+    if (( ${#sources[@]} == 1 )); then source=${sources[0]}; fi
+fi
+notify_error() {
+    if command -v zenity >/dev/null; then
+        zenity --error --title="Capture Viewer" --text="$1"
+    else
+        notify-send "Capture Viewer" "$1"
+    fi
+}
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/capture-viewer-${UID}.lock"
+flock -n 9 || exit 0
+if [[ ! -r "$video" ]]; then
+    notify_error "UltraSemi capture device not found. Check the USB connection."
+    exit 1
+fi
+if ! pactl list short sources | cut -f2 | grep -Fxq "$source"; then
+    notify_error "Capture audio source not found or ambiguous. Reconnect USB or configure the device explicitly."
+    exit 1
+fi
+logdir="${XDG_CACHE_HOME:-$HOME/.cache}/capture-viewer"
+mkdir -p "$logdir"
+audio_pid=
+video_pid=
+cleanup() {
+    [[ -z "$video_pid" ]] || kill "$video_pid" 2>/dev/null || true
+    [[ -z "$audio_pid" ]] || kill "$audio_pid" 2>/dev/null || true
+    wait 2>/dev/null || true
+}
+trap cleanup EXIT
+trap 'exit 0' INT TERM HUP
+sink=$(pactl get-default-sink) || exit 1
+pw-loopback --name=capture-viewer-audio --capture="$source" --playback="$sink" --channels=2 --latency=20 >"$logdir/audio.log" 2>&1 &
+audio_pid=$!
+SDL_VIDEO_X11_WMCLASS=capture-viewer ffplay -hide_banner -loglevel warning -nostats \
+    -window_title "Capture Viewer" \
+    -f v4l2 -input_format yuyv422 -video_size 1920x1080 -framerate 60 \
+    -fflags nobuffer -flags low_delay -framedrop -an -i "$video" \
+    >"$logdir/video.log" 2>&1 &
+video_pid=$!
+"$HOME/.local/bin/capture-viewer-window" "$video_pid" 2>>"$logdir/video.log" || true
+wait "$video_pid"
+result=$?
+video_pid=
+if (( result != 0 )); then
+    notify_error "Unable to open video. Check whether another application is using the device."
+fi
+exit "$result"

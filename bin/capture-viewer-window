@@ -1,0 +1,47 @@
+#!/usr/bin/python3
+import subprocess
+import sys
+import time
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk
+pid = sys.argv[1]
+window = None
+for _ in range(30):
+    lines = subprocess.check_output(["wmctrl", "-lp"], text=True).splitlines()
+    for line in lines:
+        fields = line.split(None, 4)
+        if len(fields) >= 3 and fields[2] == pid:
+            window = fields[0]
+            break
+    if window:
+        break
+    time.sleep(0.1)
+if not window:
+    sys.exit(0)
+subprocess.run(["wmctrl", "-ir", window, "-N", "Capture Viewer"], check=True)
+pixbuf = Gtk.IconTheme.get_default().load_icon("camera-video", 64, 0)
+w, h = pixbuf.get_width(), pixbuf.get_height()
+channels, stride = pixbuf.get_n_channels(), pixbuf.get_rowstride()
+pixels = pixbuf.get_pixels()
+values = [w, h]
+for y in range(h):
+    for x in range(w):
+        i = y * stride + x * channels
+        r, g, b = pixels[i:i+3]
+        a = pixels[i+3] if channels == 4 else 255
+        values.append((a << 24) | (r << 16) | (g << 8) | b)
+import ctypes
+xlib = ctypes.CDLL("libX11.so.6")
+xlib.XOpenDisplay.argtypes = [ctypes.c_char_p]
+xlib.XOpenDisplay.restype = ctypes.c_void_p
+xlib.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+xlib.XInternAtom.restype = ctypes.c_ulong
+xlib.XChangeProperty.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+xlib.XCloseDisplay.argtypes = [ctypes.c_void_p]
+display = xlib.XOpenDisplay(None)
+if display:
+    icon_atom = xlib.XInternAtom(display, b"_NET_WM_ICON", 0)
+    data = (ctypes.c_ulong * len(values))(*values)
+    xlib.XChangeProperty(display, int(window, 16), icon_atom, 6, 32, 0, data, len(values))
+    xlib.XCloseDisplay(display)
