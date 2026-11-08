@@ -90,3 +90,9 @@ Only application files are removed. System packages, logs and optional configura
 ## Validation
 
 The original playback configuration was tested successfully with the actual capture device. Installer syntax and isolated user-file installation/removal are checked separately. Full installation on a second computer has not yet been tested.
+
+## License
+
+The scripts and documentation in this repository are licensed under the [MIT License](LICENSE).
+
+FFmpeg/FFplay, PipeWire and other system dependencies are separate projects covered by their respective licenses. This repository does not redistribute their binaries.
